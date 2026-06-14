@@ -28,3 +28,9 @@ class UserRoleRepository(BaseRepository[UserRole], UUIDRepositoryMixin[UserRole]
 
     async def get_by_role(self, role: UUID4) -> list[UserRole]:
         return await self.list(select(UserRole).where(UserRole.role_id == role))
+
+    async def get_by_role_paginated(
+        self, role: UUID4, *, limit: int, skip: int
+    ) -> tuple[list[UserRole], int]:
+        statement = select(UserRole).where(UserRole.role_id == role)
+        return await self.paginate(statement, limit=limit, skip=skip)
