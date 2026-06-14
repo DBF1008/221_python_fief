@@ -972,6 +972,16 @@ webhook_logs: ModelMapping[WebhookLog] = {
         payload="{}",
         success=True,
     ),
+    "all_log2_failed": WebhookLog(
+        webhook=webhooks["all"],
+        event=UserCreated.key(),
+        attempt=1,
+        payload='{"type": "user.created", "data": {"email": "replay@example.com"}}',
+        success=False,
+        response="Internal Server Error",
+        error_type="HTTPStatusError",
+        error_message="Server error '500 Internal Server Error'",
+    ),
 }
 
 email_domains: ModelMapping[EmailDomain] = {

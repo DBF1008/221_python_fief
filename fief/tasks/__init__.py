@@ -7,7 +7,7 @@ from fief.tasks.heartbeat import heartbeat
 from fief.tasks.register import on_after_register
 from fief.tasks.roles import on_role_updated
 from fief.tasks.user_roles import on_user_role_created, on_user_role_deleted
-from fief.tasks.webhooks import deliver_webhook, trigger_webhooks
+from fief.tasks.webhooks import deliver_webhook, replay_webhook_log, trigger_webhooks
 
 __all__ = [
     "send_task",
@@ -21,6 +21,7 @@ __all__ = [
     "on_user_role_created",
     "on_user_role_deleted",
     "deliver_webhook",
+    "replay_webhook_log",
     "trigger_webhooks",
     "write_audit_log",
 ]

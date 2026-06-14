@@ -12,6 +12,7 @@ from fief.apps.dashboard.responses import HXRedirectResponse
 from fief.dependencies.admin_authentication import is_authenticated_admin_session
 from fief.dependencies.logger import get_audit_logger
 from fief.dependencies.pagination import PaginatedObjects
+from fief.dependencies.tasks import get_send_task
 from fief.dependencies.webhook import (
     get_paginated_webhook_logs,
     get_paginated_webhooks,
@@ -22,6 +23,7 @@ from fief.forms import FormHelper
 from fief.logger import AuditLogger
 from fief.models import AuditLogMessage, Webhook, WebhookLog
 from fief.repositories import WebhookRepository
+from fief.tasks import SendTask, replay_webhook_log
 from fief.templates import templates
 
 router = APIRouter(dependencies=[Depends(is_authenticated_admin_session)])
@@ -253,4 +255,29 @@ async def get_webhook_log(
         request,
         "admin/webhooks/logs/get.html",
         {**context, **list_context, "webhook_log": webhook_log},
+    )
+
+
+@router.post(
+    "/{id:uuid}/logs/{log_id:uuid}/replay", name="dashboard.webhooks:replay_log"
+)
+async def replay_webhook_log(
+    request: Request,
+    webhook: Webhook = Depends(get_webhook_by_id_or_404),
+    webhook_log: WebhookLog = Depends(get_webhook_log_by_id_and_webhook_or_404),
+    send_task: SendTask = Depends(get_send_task),
+    audit_logger: AuditLogger = Depends(get_audit_logger),
+):
+    """Queue a replay of the original payload recorded in ``webhook_log``.
+
+    The task will create a brand-new WebhookLog row with an incremented
+    ``attempt`` while leaving the original log untouched. The dashboard
+    redirects back to the webhook logs list so the admin can see the freshly
+    recorded entry appear.
+    """
+    send_task(replay_webhook_log, webhook_log_id=str(webhook_log.id))
+    audit_logger.log_object_write(AuditLogMessage.OBJECT_UPDATED, webhook_log)
+
+    return HXRedirectResponse(
+        request.url_for("dashboard.webhooks:logs", id=webhook.id)
     )

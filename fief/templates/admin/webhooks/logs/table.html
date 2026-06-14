@@ -29,7 +29,7 @@
 {% endmacro %}
 
 {% macro actions_column(webhook_log) %}
-<div class="flex justify-end">
+<div class="flex justify-end gap-2">
   <a
     class="btn-xs border-slate-200 hover:border-slate-300"
     href="{{ url_for('dashboard.webhooks:log', id=webhook_log.webhook_id, log_id=webhook_log.id) }}"
@@ -39,6 +39,14 @@
   >
     Details
   </a>
+  <button
+    type="button"
+    class="btn-xs bg-primary-500 hover:bg-primary-600 text-white"
+    hx-post="{{ url_for('dashboard.webhooks:replay_log', id=webhook_log.webhook_id, log_id=webhook_log.id) }}"
+    hx-trigger="click"
+  >
+    Replay
+  </button>
 </div>
 {% endmacro %}
 

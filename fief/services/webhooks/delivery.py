@@ -19,23 +19,32 @@ class WebhookDelivery:
     def __init__(self, webhook_log_repository: WebhookLogRepository) -> None:
         self.webhook_log_repository = webhook_log_repository
 
-    async def deliver(self, webhook: Webhook, event: WebhookEvent, attempt: int = 1):
+    async def deliver(
+        self,
+        webhook: Webhook,
+        event: WebhookEvent,
+        attempt: int = 1,
+        payload: str | None = None,
+    ):
         async with httpx.AsyncClient() as client:
-            payload = event.model_dump_json()
-            signature, ts = self._get_signature(payload, webhook.secret)
+            # When replaying, reuse the original serialized payload verbatim so
+            # the bytes delivered on the wire match what was originally sent and
+            # the HMAC signature corresponds to those exact bytes.
+            serialized_payload = payload if payload is not None else event.model_dump_json()
+            signature, ts = self._get_signature(serialized_payload, webhook.secret)
 
             webhook_log = WebhookLog(
                 webhook_id=webhook.id,
                 event=event.type,
                 attempt=attempt,
-                payload=payload,
+                payload=serialized_payload,
                 success=False,
             )
 
             try:
                 response = await client.post(
                     webhook.url,
-                    content=payload,
+                    content=serialized_payload,
                     headers={
                         "User-Agent": f"fief-server-webhooks/{__version__}",
                         "Content-Type": "application/json",

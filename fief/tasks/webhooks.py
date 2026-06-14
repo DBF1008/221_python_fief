@@ -3,7 +3,7 @@ import uuid
 import dramatiq
 from dramatiq.middleware import CurrentMessage
 
-from fief.models import Webhook
+from fief.models import Webhook, WebhookLog
 from fief.repositories import WebhookLogRepository, WebhookRepository
 from fief.services.webhooks.delivery import WebhookDelivery, WebhookDeliveryError
 from fief.services.webhooks.models import WebhookEvent
@@ -59,3 +59,52 @@ class TriggerWebhooksTask(TaskBase):
 
 
 trigger_webhooks = dramatiq.actor(TriggerWebhooksTask())
+
+
+class ReplayWebhookLogTask(TaskBase):
+    """Replay a previously-recorded WebhookLog.
+
+    Reads the original log and its webhook, then dispatches a fresh delivery
+    reusing the original payload verbatim. The new delivery is recorded as a
+    brand-new WebhookLog row with ``attempt = original.attempt + 1``; the
+    original log is left untouched so the audit trail stays immutable.
+    """
+
+    __name__ = "replay_webhook_log"
+
+    async def run(self, webhook_log_id: str):
+        async with self.get_main_session() as session:
+            webhook_log_repository = WebhookLogRepository(session)
+            webhook_log = await webhook_log_repository.get_by_id(
+                uuid.UUID(webhook_log_id)
+            )
+
+            if webhook_log is None:
+                raise ObjectDoesNotExistTaskError(WebhookLog, webhook_log_id)
+
+            webhook_repository = WebhookRepository(session)
+            webhook = await webhook_repository.get_by_id(webhook_log.webhook_id)
+
+            if webhook is None:
+                raise ObjectDoesNotExistTaskError(Webhook, str(webhook_log.webhook_id))
+
+            parsed_event = WebhookEvent.model_validate_json(webhook_log.payload)
+
+            webhook_delivery = WebhookDelivery(webhook_log_repository)
+            await webhook_delivery.deliver(
+                webhook,
+                parsed_event,
+                attempt=webhook_log.attempt + 1,
+                payload=webhook_log.payload,
+            )
+
+
+def should_retry_replay_webhook_log(retries_so_far, exception):
+    return retries_so_far < settings.webhooks_max_attempts and isinstance(
+        exception, WebhookDeliveryError
+    )
+
+
+replay_webhook_log = dramatiq.actor(
+    ReplayWebhookLogTask(), retry_when=should_retry_replay_webhook_log
+)
