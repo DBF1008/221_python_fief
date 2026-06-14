@@ -345,6 +345,60 @@ class TestUserChangeEmail:
             session=main_session,
         )
 
+    @pytest.mark.access_token(user="regular", acr=ACR.LEVEL_ONE)
+    async def test_repeated_and_changed_email(
+        self,
+        test_data: TestData,
+        test_client_auth_access_token: httpx.AsyncClient,
+        send_task_mock: MagicMock,
+        main_session: AsyncSession,
+    ):
+        user = test_data["users"]["regular"]
+        tenant = user.tenant
+        path_prefix = tenant.slug if not tenant.default else ""
+
+        # Request a change to a new address: a fresh code is issued and sent.
+        response = await test_client_auth_access_token.patch(
+            f"{path_prefix}/api/email/change",
+            json={"email": "anne+updated@bretagne.duchy"},
+        )
+        assert response.status_code == status.HTTP_202_ACCEPTED
+
+        email_verification_repository = EmailVerificationRepository(main_session)
+        first = await email_verification_repository.get_by_user(user.id)
+        assert len(first) == 1
+        assert first[0].email == "anne+updated@bretagne.duchy"
+        first_id = first[0].id
+        first_code = first[0].code
+        send_task_mock.assert_called_once()
+
+        # Repeating the same change within the cooldown reuses the pending code.
+        response = await test_client_auth_access_token.patch(
+            f"{path_prefix}/api/email/change",
+            json={"email": "anne+updated@bretagne.duchy"},
+        )
+        assert response.status_code == status.HTTP_202_ACCEPTED
+
+        reused = await email_verification_repository.get_by_user(user.id)
+        assert len(reused) == 1
+        assert reused[0].id == first_id
+        assert reused[0].code == first_code
+        send_task_mock.assert_called_once()
+
+        # Changing to a *different* address re-issues a code for the new email, even
+        # within the cooldown window.
+        response = await test_client_auth_access_token.patch(
+            f"{path_prefix}/api/email/change",
+            json={"email": "anne+changed@bretagne.duchy"},
+        )
+        assert response.status_code == status.HTTP_202_ACCEPTED
+
+        changed = await email_verification_repository.get_by_user(user.id)
+        assert len(changed) == 1
+        assert changed[0].email == "anne+changed@bretagne.duchy"
+        assert changed[0].id != first_id
+        assert send_task_mock.call_count == 2
+
 
 @pytest.mark.asyncio
 class TestUserVerifyEmail:

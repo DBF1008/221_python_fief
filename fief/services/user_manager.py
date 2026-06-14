@@ -1,5 +1,6 @@
 import json
 import uuid
+from datetime import UTC, datetime, timedelta
 
 from fastapi import Request
 from furl import furl
@@ -163,6 +164,20 @@ class UserManager:
             except UserDoesNotExistError:
                 pass
 
+        # If a still-valid code was requested recently for this same address, reuse
+        # it instead of regenerating and re-sending. This prevents repeated requests
+        # (across the several entry points that call this method) from invalidating
+        # the pending code and flooding the user with verification emails.
+        pending_verification = (
+            await self.email_verification_repository.get_active_by_user_and_email(
+                user.id, email
+            )
+        )
+        if pending_verification is not None and not (
+            self._email_verification_cooldown_elapsed(pending_verification)
+        ):
+            return
+
         await self.email_verification_repository.delete_by_user(user.id)
         code, code_hash = generate_verify_code()
         email_verification = EmailVerification(code=code_hash, email=email, user=user)
@@ -173,6 +188,17 @@ class UserManager:
         await self.on_after_request_verify_email(
             email_verification, code, request=request
         )
+
+    def _email_verification_cooldown_elapsed(
+        self, email_verification: EmailVerification
+    ) -> bool:
+        """Whether the reuse window for an existing verification code has passed.
+
+        Within the cooldown window the pending code is reused; once it elapses a
+        fresh code is re-issued on the next request.
+        """
+        cooldown = timedelta(seconds=settings.email_verification_cooldown_seconds)
+        return datetime.now(UTC) >= email_verification.created_at + cooldown
 
     async def verify_email(
         self, user: User, code: str, *, request: Request | None = None

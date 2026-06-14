@@ -771,15 +771,20 @@ email_verification_codes: Mapping[str, tuple[str, str]] = {
 
 
 email_verifications: ModelMapping[EmailVerification] = {
+    # Seeded as "stale" (created well before the reuse cooldown) so that a genuine
+    # verification request re-issues a fresh code and sends an email, rather than
+    # reusing this pending record.
     "not_verified_email": EmailVerification(
         code=email_verification_codes["not_verified_email"][1],
         email=users["not_verified_email"].email,
         user=users["not_verified_email"],
+        created_at=now - timedelta(seconds=600),
     ),
     "regular_update_email": EmailVerification(
         code=email_verification_codes["regular_update_email"][1],
         email="anne+updated@bretagne.duchy",
         user=users["regular"],
+        created_at=now - timedelta(seconds=600),
     ),
 }
 

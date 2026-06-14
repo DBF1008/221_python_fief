@@ -8,6 +8,7 @@ from fastapi import status
 
 from fief.db import AsyncSession
 from fief.repositories import (
+    EmailVerificationRepository,
     UserPermissionRepository,
     UserRepository,
     UserRoleRepository,
@@ -421,6 +422,35 @@ class TestVerifyEmailRequest:
             send_task_mock=send_task_mock,
             session=main_session,
         )
+
+    @pytest.mark.authenticated_admin(mode="session")
+    @pytest.mark.htmx()
+    async def test_resend_reuses_pending(
+        self,
+        test_client_dashboard: httpx.AsyncClient,
+        test_data: TestData,
+        send_task_mock: MagicMock,
+        main_session: AsyncSession,
+    ):
+        user = test_data["users"]["not_verified_email"]
+
+        # First admin request issues a code and sends one email.
+        response = await test_client_dashboard.post(f"/users/{user.id}/verify-request")
+        assert response.status_code == status.HTTP_202_ACCEPTED
+
+        email_verification_repository = EmailVerificationRepository(main_session)
+        first = await email_verification_repository.get_by_user(user.id)
+        assert len(first) == 1
+
+        # Second admin request within the cooldown reuses the pending code; no new
+        # record is created and no additional email is sent.
+        response = await test_client_dashboard.post(f"/users/{user.id}/verify-request")
+        assert response.status_code == status.HTTP_202_ACCEPTED
+
+        second = await email_verification_repository.get_by_user(user.id)
+        assert len(second) == 1
+        assert second[0].id == first[0].id
+        send_task_mock.assert_called_once()
 
 
 @pytest.mark.asyncio

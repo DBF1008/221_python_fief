@@ -1,4 +1,5 @@
 import urllib.parse
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 import httpx
@@ -788,6 +789,7 @@ class TestAuthVerifyEmailRequest:
         test_client_auth: httpx.AsyncClient,
         test_data: TestData,
         main_session: AsyncSession,
+        send_task_mock: MagicMock,
     ):
         user = test_data["users"]["not_verified_email"]
         tenant = user.tenant
@@ -797,21 +799,78 @@ class TestAuthVerifyEmailRequest:
             "not_verified_email"
         ][0]
 
-        # First request
-        response = await test_client_auth.get(
-            f"{path_prefix}/verify-request", cookies=cookies
-        )
-        assert response.status_code == status.HTTP_302_FOUND
-
-        # Second request
+        # First request: re-issues a fresh code and sends one email.
         response = await test_client_auth.get(
             f"{path_prefix}/verify-request", cookies=cookies
         )
         assert response.status_code == status.HTTP_302_FOUND
 
         email_verification_repository = EmailVerificationRepository(main_session)
-        email_verifications = await email_verification_repository.get_by_user(user.id)
-        assert len(email_verifications) == 1
+        first = await email_verification_repository.get_by_user(user.id)
+        assert len(first) == 1
+        first_code = first[0].code
+
+        # Second request within the cooldown window: the pending code is reused, so
+        # no new record is created and no additional email is sent.
+        response = await test_client_auth.get(
+            f"{path_prefix}/verify-request", cookies=cookies
+        )
+        assert response.status_code == status.HTTP_302_FOUND
+
+        second = await email_verification_repository.get_by_user(user.id)
+        assert len(second) == 1
+        assert second[0].id == first[0].id
+        assert second[0].code == first_code
+        send_task_mock.assert_called_once()
+
+    async def test_reissues_after_cooldown(
+        self,
+        test_client_auth: httpx.AsyncClient,
+        test_data: TestData,
+        main_session: AsyncSession,
+        send_task_mock: MagicMock,
+    ):
+        user = test_data["users"]["not_verified_email"]
+        tenant = user.tenant
+        path_prefix = tenant.slug if not tenant.default else ""
+        cookies = {}
+        cookies[settings.session_cookie_name] = session_token_tokens[
+            "not_verified_email"
+        ][0]
+
+        # First request issues a code and sends an email.
+        response = await test_client_auth.get(
+            f"{path_prefix}/verify-request", cookies=cookies
+        )
+        assert response.status_code == status.HTTP_302_FOUND
+
+        email_verification_repository = EmailVerificationRepository(main_session)
+        pending = (await email_verification_repository.get_by_user(user.id))[0]
+        first_id = pending.id
+        first_code = pending.code
+
+        # Move the pending verification past the cooldown window.
+        pending.created_at = datetime.now(UTC) - timedelta(
+            seconds=settings.email_verification_cooldown_seconds + 5
+        )
+        await email_verification_repository.update(pending)
+
+        # The next request now re-issues a brand-new code and sends another email.
+        response = await test_client_auth.get(
+            f"{path_prefix}/verify-request", cookies=cookies
+        )
+        assert response.status_code == status.HTTP_302_FOUND
+
+        reissued = await email_verification_repository.get_by_user(user.id)
+        assert len(reissued) == 1
+        assert reissued[0].id != first_id
+        assert reissued[0].code != first_code
+        assert send_task_mock.call_count == 2
+        # The two emails carried different codes.
+        assert (
+            send_task_mock.call_args_list[0][0][2]
+            != send_task_mock.call_args_list[1][0][2]
+        )
 
 
 @pytest.mark.asyncio
