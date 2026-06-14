@@ -15,3 +15,12 @@ class BaseUserRole(CreatedUpdatedAt):
 
 class UserRole(BaseUserRole):
     role: RoleEmbedded
+
+
+class UserRoleSync(BaseModel):
+    role_ids: list[UUID4]
+
+
+class UserRoleSyncResult(BaseModel):
+    added: list[UUID4]
+    removed: list[UUID4]

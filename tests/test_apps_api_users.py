@@ -843,6 +843,123 @@ class TestDeleteUserRole:
 
 
 @pytest.mark.asyncio
+class TestSyncUserRoles:
+    async def test_unauthorized(
+        self,
+        unauthorized_api_assertions: HTTPXResponseAssertion,
+        test_client_api: httpx.AsyncClient,
+        test_data: TestData,
+    ):
+        user = test_data["users"]["regular"]
+        role = test_data["roles"]["castles_visitor"]
+        response = await test_client_api.put(
+            f"/users/{user.id}/roles", json={"role_ids": [str(role.id)]}
+        )
+
+        unauthorized_api_assertions(response)
+
+    @pytest.mark.authenticated_admin
+    async def test_unknown_user(
+        self,
+        test_client_api: httpx.AsyncClient,
+        not_existing_uuid: uuid.UUID,
+        test_data: TestData,
+    ):
+        role = test_data["roles"]["castles_visitor"]
+        response = await test_client_api.put(
+            f"/users/{not_existing_uuid}/roles",
+            json={"role_ids": [str(role.id)]},
+        )
+
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+
+    @pytest.mark.authenticated_admin
+    async def test_unknown_role(
+        self,
+        test_client_api: httpx.AsyncClient,
+        not_existing_uuid: uuid.UUID,
+        test_data: TestData,
+    ):
+        user = test_data["users"]["regular"]
+        visitor_role = test_data["roles"]["castles_visitor"]
+        response = await test_client_api.put(
+            f"/users/{user.id}/roles",
+            json={"role_ids": [str(visitor_role.id), str(not_existing_uuid)]},
+        )
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+        json = response.json()
+        assert json["detail"] == APIErrorCode.USER_ROLE_SYNC_NOT_EXISTING_ROLE
+
+    @pytest.mark.authenticated_admin
+    async def test_valid(
+        self,
+        test_client_api: httpx.AsyncClient,
+        test_data: TestData,
+        main_session: AsyncSession,
+        send_task_mock: MagicMock,
+    ):
+        """Swap castles_visitor for castles_manager and verify full diff response."""
+        user = test_data["users"]["regular"]
+        manager_role = test_data["roles"]["castles_manager"]
+        visitor_role = test_data["roles"]["castles_visitor"]
+
+        response = await test_client_api.put(
+            f"/users/{user.id}/roles",
+            json={"role_ids": [str(manager_role.id)]},
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+
+        json = response.json()
+        assert str(manager_role.id) in json["added"]
+        assert str(visitor_role.id) in json["removed"]
+
+        # Verify DB state
+        user_role_repository = UserRoleRepository(main_session)
+        user_roles = await user_role_repository.list(
+            user_role_repository.get_by_user_statement(user.id)
+        )
+        assert len(user_roles) == 1
+        assert user_roles[0].role_id == manager_role.id
+
+        # Verify task dispatches: role-specific tasks dispatched exactly once each
+        send_task_mock.assert_any_call(
+            on_user_role_created, str(user.id), str(manager_role.id)
+        )
+        send_task_mock.assert_any_call(
+            on_user_role_deleted, str(user.id), str(visitor_role.id)
+        )
+
+    @pytest.mark.authenticated_admin
+    async def test_idempotent(
+        self,
+        test_client_api: httpx.AsyncClient,
+        test_data: TestData,
+        send_task_mock: MagicMock,
+    ):
+        """Syncing with the same roles twice produces empty diff on second call."""
+        user = test_data["users"]["regular"]
+        visitor_role = test_data["roles"]["castles_visitor"]
+
+        # First call (should be a no-op since user already has this role)
+        response = await test_client_api.put(
+            f"/users/{user.id}/roles",
+            json={"role_ids": [str(visitor_role.id)]},
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+
+        json = response.json()
+        assert json["added"] == []
+        assert json["removed"] == []
+
+        # No tasks dispatched for no-op
+        send_task_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
 class TestListUserOAuthAccounts:
     async def test_unauthorized(
         self,

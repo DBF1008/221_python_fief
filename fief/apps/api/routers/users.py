@@ -54,6 +54,7 @@ from fief.services.user_manager import (
 from fief.services.user_roles import (
     UserRoleAlreadyExists,
     UserRoleDoesNotExist,
+    UserRoleSyncNotExistingRole,
     UserRolesService,
 )
 from fief.services.webhooks.models import (
@@ -400,6 +401,26 @@ async def delete_user_role(
         await user_roles.delete_role(user, role)
     except UserRoleDoesNotExist as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from e
+
+
+@router.put("/{id:uuid}/roles", name="users:sync_roles")
+async def sync_user_roles(
+    user_role_sync: schemas.user_role.UserRoleSync,
+    user: User = Depends(get_user_by_id_or_404),
+    user_roles: UserRolesService = Depends(get_user_roles_service),
+) -> schemas.user_role.UserRoleSyncResult:
+    try:
+        added, removed = await user_roles.set_roles(user, user_role_sync.role_ids)
+    except UserRoleSyncNotExistingRole as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=APIErrorCode.USER_ROLE_SYNC_NOT_EXISTING_ROLE,
+        ) from e
+
+    return schemas.user_role.UserRoleSyncResult(
+        added=[ur.role_id for ur in added],
+        removed=[ur.role_id for ur in removed],
+    )
 
 
 @router.get(
