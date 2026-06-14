@@ -228,7 +228,7 @@ dependencies = [
     "httpx-oauth ==0.15.1",
     "itsdangerous ==2.2.0",
     "Jinja2 ==3.1.4",
-    "jwcrypto ==1.5.6",
+    "jwcrypto ==1.5.7",
     "loguru ==0.7.2",
     "phonenumbers >=8.12.48,<8.14",
     "posthog >=3.0.1,<4",
