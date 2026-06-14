@@ -58,7 +58,7 @@ class UUIDRepositoryProtocol(BaseRepositoryProtocol, Protocol[M_UUID]):
 class ExpiresAtRepositoryProtocol(BaseRepositoryProtocol, Protocol[M_EXPIRES_AT]):
     model: type[M_EXPIRES_AT]
 
-    async def delete_expired(self) -> None: ...  # pragma: no cover
+    async def delete_expired(self, batch_size: int = 1000) -> int: ...  # pragma: no cover
 
 
 class BaseRepository(BaseRepositoryProtocol, Generic[M]):
@@ -185,9 +185,34 @@ class UUIDRepositoryMixin(Generic[M_UUID]):
 
 
 class ExpiresAtMixin(Generic[M_EXPIRES_AT]):
-    async def delete_expired(self: ExpiresAtRepositoryProtocol[M_EXPIRES_AT]):
-        statement = delete(self.model).where(self.model.is_expired.is_(True))
-        await self._execute_statement(statement)
+    async def delete_expired(
+        self: ExpiresAtRepositoryProtocol[M_EXPIRES_AT],
+        batch_size: int = 1000,
+    ) -> int:
+        total_deleted = 0
+        while True:
+            dialect = self.session.get_bind().dialect.name
+            if dialect == "postgresql":
+                # PostgreSQL 不支持 DELETE ... LIMIT，使用子查询
+                subq = (
+                    select(self.model.id)
+                    .where(self.model.is_expired.is_(True))
+                    .limit(batch_size)
+                )
+                statement = delete(self.model).where(self.model.id.in_(subq))
+            else:
+                # MySQL / SQLite 原生支持 DELETE ... LIMIT
+                statement = (
+                    delete(self.model)
+                    .where(self.model.is_expired.is_(True))
+                    .limit(batch_size)
+                )
+            result = await self._execute_statement(statement)
+            deleted = result.rowcount
+            total_deleted += deleted
+            if deleted < batch_size:
+                break
+        return total_deleted
 
 
 REPOSITORY = TypeVar("REPOSITORY", bound=BaseRepository)
