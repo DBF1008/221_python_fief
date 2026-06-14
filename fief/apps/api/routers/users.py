@@ -32,6 +32,7 @@ from fief.logger import AuditLogger
 from fief.models import (
     AuditLogMessage,
     OAuthAccount,
+    Role,
     User,
     UserPermission,
     UserRole,
@@ -377,6 +378,35 @@ async def create_user_role(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=APIErrorCode.USER_ROLE_CREATE_ALREADY_ADDED_ROLE,
         ) from e
+
+
+@router.put(
+    "/{id:uuid}/roles",
+    name="users:set_roles",
+    response_model=list[schemas.user_role.UserRole],
+)
+async def set_user_roles(
+    user_roles_update: schemas.user_role.UserRolesUpdate,
+    user: User = Depends(get_user_by_id_or_404),
+    role_repository: RoleRepository = Depends(get_repository(RoleRepository)),
+    user_roles: UserRolesService = Depends(get_user_roles_service),
+) -> list[schemas.user_role.UserRole]:
+    roles: list[Role] = []
+    for role_id in set(user_roles_update.ids):
+        role = await role_repository.get_by_id(role_id)
+        if role is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=APIErrorCode.USER_ROLE_CREATE_NOT_EXISTING_ROLE,
+            )
+        roles.append(role)
+
+    result = await user_roles.set_roles(user, roles)
+
+    return [
+        schemas.user_role.UserRole.model_validate(user_role)
+        for user_role in result.roles
+    ]
 
 
 @router.delete(

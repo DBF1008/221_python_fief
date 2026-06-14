@@ -8,6 +8,10 @@ class UserRoleCreate(BaseModel):
     id: UUID4
 
 
+class UserRolesUpdate(BaseModel):
+    ids: list[UUID4]
+
+
 class BaseUserRole(CreatedUpdatedAt):
     user_id: UUID4
     role_id: UUID4
