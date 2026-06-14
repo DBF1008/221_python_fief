@@ -12,6 +12,7 @@ from fief.apps.dashboard.responses import HXRedirectResponse
 from fief.dependencies.admin_authentication import is_authenticated_admin_session
 from fief.dependencies.logger import get_audit_logger
 from fief.dependencies.pagination import PaginatedObjects
+from fief.dependencies.tasks import get_send_task
 from fief.dependencies.webhook import (
     get_paginated_webhook_logs,
     get_paginated_webhooks,
@@ -22,6 +23,7 @@ from fief.forms import FormHelper
 from fief.logger import AuditLogger
 from fief.models import AuditLogMessage, Webhook, WebhookLog
 from fief.repositories import WebhookRepository
+from fief.tasks import SendTask, replay_webhook
 from fief.templates import templates
 
 router = APIRouter(dependencies=[Depends(is_authenticated_admin_session)])
@@ -252,5 +254,34 @@ async def get_webhook_log(
     return templates.TemplateResponse(
         request,
         "admin/webhooks/logs/get.html",
+        {**context, **list_context, "webhook_log": webhook_log},
+    )
+
+
+@router.api_route(
+    "/{id:uuid}/logs/{log_id:uuid}/replay",
+    methods=["GET", "POST"],
+    name="dashboard.webhooks:replay_log",
+)
+async def replay_webhook_log(
+    request: Request,
+    webhook_log: WebhookLog = Depends(get_webhook_log_by_id_and_webhook_or_404),
+    send_task: SendTask = Depends(get_send_task),
+    list_context=Depends(get_logs_list_context),
+    context: BaseContext = Depends(get_base_context),
+):
+    if request.method == "POST":
+        send_task(
+            replay_webhook,
+            webhook_id=str(webhook_log.webhook_id),
+            webhook_log_id=str(webhook_log.id),
+        )
+        return HXRedirectResponse(
+            request.url_for("dashboard.webhooks:logs", id=webhook_log.webhook_id)
+        )
+
+    return templates.TemplateResponse(
+        request,
+        "admin/webhooks/logs/replay.html",
         {**context, **list_context, "webhook_log": webhook_log},
     )

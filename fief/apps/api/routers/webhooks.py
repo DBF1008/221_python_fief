@@ -4,15 +4,18 @@ from fief import schemas
 from fief.dependencies.admin_authentication import is_authenticated_admin_api
 from fief.dependencies.logger import get_audit_logger
 from fief.dependencies.pagination import PaginatedObjects
+from fief.dependencies.tasks import get_send_task
 from fief.dependencies.webhook import (
     get_paginated_webhook_logs,
     get_paginated_webhooks,
     get_webhook_by_id_or_404,
+    get_webhook_log_by_id_and_webhook_or_404,
 )
 from fief.logger import AuditLogger
 from fief.models import AuditLogMessage, Webhook, WebhookLog
 from fief.repositories import WebhookRepository
 from fief.schemas.generics import PaginatedResults
+from fief.tasks import SendTask, replay_webhook
 
 router = APIRouter(dependencies=[Depends(is_authenticated_admin_api)])
 
@@ -124,3 +127,21 @@ async def list_webhook_logs(
             for webhook_log in webhook_logs
         ],
     )
+
+
+@router.post(
+    "/{id:uuid}/logs/{log_id:uuid}/replay",
+    name="webhooks:replay_log",
+    response_model=schemas.webhook_log.WebhookLog,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def replay_webhook_log(
+    webhook_log: WebhookLog = Depends(get_webhook_log_by_id_and_webhook_or_404),
+    send_task: SendTask = Depends(get_send_task),
+) -> schemas.webhook_log.WebhookLog:
+    send_task(
+        replay_webhook,
+        webhook_id=str(webhook_log.webhook_id),
+        webhook_log_id=str(webhook_log.id),
+    )
+    return schemas.webhook_log.WebhookLog.model_validate(webhook_log)

@@ -20,13 +20,28 @@ class WebhookDelivery:
         self.webhook_log_repository = webhook_log_repository
 
     async def deliver(self, webhook: Webhook, event: WebhookEvent, attempt: int = 1):
+        await self._send(webhook, event.type, event.model_dump_json(), attempt)
+
+    async def replay(
+        self, webhook: Webhook, webhook_log: WebhookLog, attempt: int = 1
+    ) -> None:
+        """Re-deliver the original payload of a past `WebhookLog`.
+
+        The stored payload bytes are re-sent as-is (with a fresh signature) and a
+        brand-new `WebhookLog` is recorded for this attempt. The original log is never
+        mutated.
+        """
+        await self._send(webhook, webhook_log.event, webhook_log.payload, attempt)
+
+    async def _send(
+        self, webhook: Webhook, event_type: str, payload: str, attempt: int
+    ) -> None:
         async with httpx.AsyncClient() as client:
-            payload = event.model_dump_json()
             signature, ts = self._get_signature(payload, webhook.secret)
 
             webhook_log = WebhookLog(
                 webhook_id=webhook.id,
-                event=event.type,
+                event=event_type,
                 attempt=attempt,
                 payload=payload,
                 success=False,

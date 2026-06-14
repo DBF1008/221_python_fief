@@ -130,3 +130,78 @@ class TestWebhookDelivery:
         assert webhook_log.error_type == "HTTPError"
         assert webhook_log.error_message == "Something went wrong"
         assert not webhook_log.success
+
+
+@pytest.mark.asyncio
+class TestWebhookReplay:
+    async def test_replay_success(
+        self,
+        respx_mock: respx.MockRouter,
+        webhook_delivery: WebhookDelivery,
+        test_data: TestData,
+        main_session: AsyncSession,
+    ):
+        webhook = test_data["webhooks"]["all"]
+        webhook_log = test_data["webhook_logs"]["all_log1"]
+        route_mock = respx_mock.post(webhook.url).mock(
+            return_value=httpx.Response(200, text="Ok")
+        )
+
+        await webhook_delivery.replay(webhook, webhook_log)
+
+        assert route_mock.called
+        request, _ = route_mock.calls.last
+        # The original payload bytes are re-sent verbatim.
+        assert request.content == webhook_log.payload.encode("utf-8")
+
+        webhook_log_repository = WebhookLogRepository(main_session)
+        webhook_logs = await webhook_log_repository.list(
+            select(WebhookLog).order_by(WebhookLog.created_at.desc())
+        )
+        assert len(webhook_logs) == len(test_data["webhook_logs"]) + 1
+
+        new_log = webhook_logs[0]
+        assert new_log.id != webhook_log.id
+        assert new_log.webhook_id == webhook.id
+        assert new_log.event == webhook_log.event
+        assert new_log.payload == webhook_log.payload
+        assert new_log.response == "Ok"
+        assert new_log.success
+
+        # The original log must be left untouched.
+        original = await webhook_log_repository.get_by_id(webhook_log.id)
+        assert original is not None
+        assert original.success is True
+        assert original.attempt == webhook_log.attempt
+
+    async def test_replay_status_error(
+        self,
+        respx_mock: respx.MockRouter,
+        webhook_delivery: WebhookDelivery,
+        test_data: TestData,
+        main_session: AsyncSession,
+    ):
+        webhook = test_data["webhooks"]["all"]
+        webhook_log = test_data["webhook_logs"]["all_log1"]
+        respx_mock.post(webhook.url).mock(
+            return_value=httpx.Response(400, text="Bad Request")
+        )
+
+        with pytest.raises(WebhookDeliveryError):
+            await webhook_delivery.replay(webhook, webhook_log)
+
+        webhook_log_repository = WebhookLogRepository(main_session)
+        webhook_logs = await webhook_log_repository.list(
+            select(WebhookLog).order_by(WebhookLog.created_at.desc())
+        )
+        assert len(webhook_logs) == len(test_data["webhook_logs"]) + 1
+
+        new_log = webhook_logs[0]
+        assert new_log.id != webhook_log.id
+        assert new_log.success is False
+        assert new_log.error_type == "HTTPStatusError"
+
+        # The original (successful) log must be left untouched.
+        original = await webhook_log_repository.get_by_id(webhook_log.id)
+        assert original is not None
+        assert original.success is True

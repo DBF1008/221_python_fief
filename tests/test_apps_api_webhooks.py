@@ -1,9 +1,11 @@
 import uuid
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
 from fastapi import status
 
+from fief.tasks import replay_webhook
 from tests.data import TestData
 from tests.helpers import HTTPXResponseAssertion
 
@@ -252,3 +254,73 @@ class TestListWebhookLogs:
                 if log.webhook_id == webhook.id
             ]
         )
+
+
+@pytest.mark.asyncio
+class TestReplayWebhookLog:
+    async def test_unauthorized(
+        self,
+        unauthorized_api_assertions: HTTPXResponseAssertion,
+        test_client_api: httpx.AsyncClient,
+        test_data: TestData,
+    ):
+        webhook = test_data["webhooks"]["all"]
+        webhook_log = test_data["webhook_logs"]["all_log1"]
+        response = await test_client_api.post(
+            f"/webhooks/{webhook.id}/logs/{webhook_log.id}/replay"
+        )
+
+        unauthorized_api_assertions(response)
+
+    @pytest.mark.authenticated_admin
+    async def test_not_existing_webhook(
+        self,
+        test_client_api: httpx.AsyncClient,
+        not_existing_uuid: uuid.UUID,
+        test_data: TestData,
+    ):
+        webhook_log = test_data["webhook_logs"]["all_log1"]
+        response = await test_client_api.post(
+            f"/webhooks/{not_existing_uuid}/logs/{webhook_log.id}/replay"
+        )
+
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+
+    @pytest.mark.authenticated_admin
+    async def test_not_existing_log(
+        self,
+        test_client_api: httpx.AsyncClient,
+        not_existing_uuid: uuid.UUID,
+        test_data: TestData,
+    ):
+        webhook = test_data["webhooks"]["all"]
+        response = await test_client_api.post(
+            f"/webhooks/{webhook.id}/logs/{not_existing_uuid}/replay"
+        )
+
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+
+    @pytest.mark.authenticated_admin
+    async def test_valid(
+        self,
+        test_client_api: httpx.AsyncClient,
+        test_data: TestData,
+        send_task_mock: MagicMock,
+    ):
+        webhook = test_data["webhooks"]["all"]
+        webhook_log = test_data["webhook_logs"]["all_log1"]
+        response = await test_client_api.post(
+            f"/webhooks/{webhook.id}/logs/{webhook_log.id}/replay"
+        )
+
+        assert response.status_code == status.HTTP_202_ACCEPTED
+
+        json = response.json()
+        assert json["id"] == str(webhook_log.id)
+
+        send_task_mock.assert_called_once()
+        assert send_task_mock.call_args.args[0] is replay_webhook
+        assert send_task_mock.call_args.kwargs == {
+            "webhook_id": str(webhook.id),
+            "webhook_log_id": str(webhook_log.id),
+        }

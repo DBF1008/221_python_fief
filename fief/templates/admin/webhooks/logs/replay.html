@@ -1,0 +1,33 @@
+{% import "macros/modal.html" as modal %}
+
+{% extends "admin/webhooks/logs/list.html" %}
+
+{% block head_title_content %}Replay webhook log · {{ super() }}{% endblock %}
+
+{% set open_modal = true %}
+
+{% block modal %}
+<div _="on fief:closeModal go back">
+  {% call modal.header() %}
+    {% call modal.title() %}Replay this delivery?{% endcall %}
+  {% endcall %}
+  {% call modal.body() %}
+    <p class="text-justify">
+      This will re-send the original payload of the delivery from
+      {{ webhook_log.created_at.strftime('%x %X') }} to the webhook URL as a new
+      attempt. The original log is kept unchanged.
+    </p>
+  {% endcall %}
+  {% call modal.footer() %}
+    <button type="button" class="btn-sm border-slate-200 hover:border-slate-300 text-slate-600" _="install CloseModalButton()">Cancel</button>
+    <button
+      type="button"
+      class="btn-sm bg-primary-500 hover:bg-primary-600 text-white"
+      hx-post="{{ url_for('dashboard.webhooks:replay_log', id=webhook_log.webhook_id, log_id=webhook_log.id) }}"
+      hx-target="#modal"
+    >
+      Replay
+    </button>
+  {% endcall %}
+</div>
+{% endblock %}

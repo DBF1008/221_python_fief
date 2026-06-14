@@ -50,6 +50,14 @@
     </div>
   {% endcall %}
   {% call modal.footer() %}
+    <button
+      type="button"
+      class="btn-sm bg-primary-500 hover:bg-primary-600 text-white"
+      hx-get="{{ url_for('dashboard.webhooks:replay_log', id=webhook_log.webhook_id, log_id=webhook_log.id) }}"
+      hx-target="#modal"
+    >
+      Replay
+    </button>
     <button type="button" class="btn-sm border-slate-200 hover:border-slate-300 text-slate-600" _="install CloseModalButton()">Close</button>
   {% endcall %}
 {% endblock %}

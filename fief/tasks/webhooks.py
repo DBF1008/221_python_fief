@@ -3,7 +3,7 @@ import uuid
 import dramatiq
 from dramatiq.middleware import CurrentMessage
 
-from fief.models import Webhook
+from fief.models import Webhook, WebhookLog
 from fief.repositories import WebhookLogRepository, WebhookRepository
 from fief.services.webhooks.delivery import WebhookDelivery, WebhookDeliveryError
 from fief.services.webhooks.models import WebhookEvent
@@ -40,6 +40,38 @@ def should_retry_deliver_webhook(retries_so_far, exception):
 
 deliver_webhook = dramatiq.actor(
     DeliverWebhookTask(), retry_when=should_retry_deliver_webhook
+)
+
+
+class ReplayWebhookTask(TaskBase):
+    __name__ = "replay_webhook"
+
+    async def run(self, webhook_id: str, webhook_log_id: str):
+        async with self.get_main_session() as session:
+            webhook_repository = WebhookRepository(session)
+            webhook = await webhook_repository.get_by_id(uuid.UUID(webhook_id))
+
+            if webhook is None:
+                raise ObjectDoesNotExistTaskError(Webhook, webhook_id)
+
+            webhook_log_repository = WebhookLogRepository(session)
+            webhook_log = await webhook_log_repository.get_by_id_and_webhook(
+                uuid.UUID(webhook_log_id), webhook.id
+            )
+
+            if webhook_log is None:
+                raise ObjectDoesNotExistTaskError(WebhookLog, webhook_log_id)
+
+            retries = 0
+            if (message := CurrentMessage.get_current_message()) is not None:
+                retries = message.options.get("retries", 0)
+
+            webhook_delivery = WebhookDelivery(webhook_log_repository)
+            await webhook_delivery.replay(webhook, webhook_log, attempt=retries + 1)
+
+
+replay_webhook = dramatiq.actor(
+    ReplayWebhookTask(), retry_when=should_retry_deliver_webhook
 )
 
 

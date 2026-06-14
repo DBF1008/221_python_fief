@@ -1,4 +1,5 @@
 import uuid
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
@@ -7,6 +8,7 @@ from fastapi import status
 
 from fief.db import AsyncSession
 from fief.repositories import WebhookRepository
+from fief.tasks import replay_webhook
 from tests.data import TestData
 from tests.helpers import HTTPXResponseAssertion
 
@@ -409,3 +411,80 @@ class TestGetWebhookLog:
         )
 
         assert response.status_code == status.HTTP_200_OK
+
+
+@pytest.mark.asyncio
+class TestReplayWebhookLog:
+    async def test_unauthorized(
+        self,
+        unauthorized_dashboard_assertions: HTTPXResponseAssertion,
+        test_client_dashboard: httpx.AsyncClient,
+        test_data: TestData,
+    ):
+        webhook = test_data["webhooks"]["all"]
+        webhook_log = test_data["webhook_logs"]["all_log1"]
+        response = await test_client_dashboard.post(
+            f"/webhooks/{webhook.id}/logs/{webhook_log.id}/replay"
+        )
+
+        unauthorized_dashboard_assertions(response)
+
+    @pytest.mark.authenticated_admin(mode="session")
+    async def test_not_existing_log(
+        self,
+        test_client_dashboard: httpx.AsyncClient,
+        not_existing_uuid: uuid.UUID,
+        test_data: TestData,
+    ):
+        webhook = test_data["webhooks"]["all"]
+        response = await test_client_dashboard.post(
+            f"/webhooks/{webhook.id}/logs/{not_existing_uuid}/replay"
+        )
+
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+
+    @pytest.mark.authenticated_admin(mode="session")
+    @pytest.mark.htmx(target="modal")
+    async def test_valid_get(
+        self, test_client_dashboard: httpx.AsyncClient, test_data: TestData
+    ):
+        webhook = test_data["webhooks"]["all"]
+        webhook_log = test_data["webhook_logs"]["all_log1"]
+        response = await test_client_dashboard.get(
+            f"/webhooks/{webhook.id}/logs/{webhook_log.id}/replay"
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+
+        html = BeautifulSoup(response.text, features="html.parser")
+        submit_button = html.find(
+            "button",
+            attrs={
+                "hx-post": f"http://api.fief.dev/webhooks/{webhook.id}/logs/{webhook_log.id}/replay"
+            },
+        )
+        assert submit_button is not None
+
+    @pytest.mark.authenticated_admin(mode="session")
+    @pytest.mark.htmx(target="modal")
+    async def test_valid_post(
+        self,
+        test_client_dashboard: httpx.AsyncClient,
+        test_data: TestData,
+        send_task_mock: MagicMock,
+    ):
+        webhook = test_data["webhooks"]["all"]
+        webhook_log = test_data["webhook_logs"]["all_log1"]
+        response = await test_client_dashboard.post(
+            f"/webhooks/{webhook.id}/logs/{webhook_log.id}/replay"
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        assert "HX-Redirect" in response.headers
+
+        send_task_mock.assert_called_once()
+        assert send_task_mock.call_args.args[0] is replay_webhook
+        assert send_task_mock.call_args.kwargs == {
+            "webhook_id": str(webhook.id),
+            "webhook_log_id": str(webhook_log.id),
+        }
