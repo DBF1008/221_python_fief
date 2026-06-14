@@ -1,5 +1,4 @@
 from datetime import UTC, datetime
-from typing import cast
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from fastapi.exceptions import RequestValidationError
@@ -27,6 +26,9 @@ from fief.repositories import (
 )
 from fief.schemas.generics import PaginatedResults
 from fief.services.oauth_provider import get_oauth_provider_service
+from fief.services.oauth_provider_access_token import (
+    refresh_oauth_account_access_token,
+)
 from fief.services.webhooks.models import (
     OAuthProviderCreated,
     OAuthProviderDeleted,
@@ -187,8 +189,8 @@ async def get_user_access_token(
     if oauth_account.is_expired():
         oauth_provider_service = get_oauth_provider_service(oauth_provider)
         try:
-            access_token_dict = await oauth_provider_service.refresh_token(
-                cast(str, oauth_account.refresh_token)
+            access_token_dict = await refresh_oauth_account_access_token(
+                oauth_account, oauth_provider_service
             )
         except RefreshTokenNotSupportedError as e:
             raise HTTPException(

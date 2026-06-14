@@ -415,3 +415,40 @@ class TestGetOAuthProviderUserAccessToken:
         assert updated_oauth_account is not None
         assert updated_oauth_account.access_token == "REFRESHED_ACCESS_TOKEN"
         assert updated_oauth_account.expires_at == expires_at
+
+    @pytest.mark.authenticated_admin
+    async def test_expired_token_then_reuse(
+        self,
+        mocker: MockerFixture,
+        test_client_api: httpx.AsyncClient,
+        test_data: TestData,
+    ):
+        oauth_provider_service_mock = MagicMock(spec=BaseOAuth2)
+        expires_at = datetime.now(UTC).replace(microsecond=0) + timedelta(seconds=3600)
+        oauth_provider_service_mock.refresh_token.side_effect = AsyncMock(
+            return_value={
+                "access_token": "REFRESHED_ACCESS_TOKEN",
+                "expires_in": 3600,
+                "expires_at": int(expires_at.timestamp()),
+            }
+        )
+        mocker.patch(
+            "fief.apps.api.routers.oauth_providers.get_oauth_provider_service"
+        ).return_value = oauth_provider_service_mock
+
+        oauth_provider = test_data["oauth_providers"]["openid"]
+        user = test_data["users"]["regular"]
+        url = f"/oauth-providers/{oauth_provider.id}/access-token/{user.id}"
+
+        # First call refreshes the expired token and persists it.
+        first_response = await test_client_api.get(url)
+        assert first_response.status_code == status.HTTP_200_OK
+        assert first_response.json()["access_token"] == "REFRESHED_ACCESS_TOKEN"
+
+        # Second call reuses the now-fresh, persisted token without refreshing
+        # again (the unchanged ``is_expired()`` direct-return path).
+        second_response = await test_client_api.get(url)
+        assert second_response.status_code == status.HTTP_200_OK
+        assert second_response.json()["access_token"] == "REFRESHED_ACCESS_TOKEN"
+
+        assert oauth_provider_service_mock.refresh_token.call_count == 1
