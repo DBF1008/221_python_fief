@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import Sequence
 from typing import Any, Generic, Protocol, TypeVar, cast
 
@@ -6,7 +7,12 @@ from pydantic import UUID4
 from sqlalchemy import delete, func, over, select
 from sqlalchemy.engine import Result
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import InstrumentedAttribute, RelationshipProperty, contains_eager
+from sqlalchemy.orm import (
+    InstrumentedAttribute,
+    RelationshipProperty,
+    class_mapper,
+    contains_eager,
+)
 from sqlalchemy.sql import Executable, Select
 
 from fief.dependencies.db import get_main_async_session
@@ -58,7 +64,13 @@ class UUIDRepositoryProtocol(BaseRepositoryProtocol, Protocol[M_UUID]):
 class ExpiresAtRepositoryProtocol(BaseRepositoryProtocol, Protocol[M_EXPIRES_AT]):
     model: type[M_EXPIRES_AT]
 
-    async def delete_expired(self) -> None: ...  # pragma: no cover
+    async def delete_expired(
+        self, *, batch_size: int = ..., delay: float = ...
+    ) -> int: ...  # pragma: no cover
+
+    async def delete_expired_batch(
+        self, batch_size: int
+    ) -> int: ...  # pragma: no cover
 
 
 class BaseRepository(BaseRepositoryProtocol, Generic[M]):
@@ -184,10 +196,71 @@ class UUIDRepositoryMixin(Generic[M_UUID]):
         return await self.get_one_or_none(statement)
 
 
+DEFAULT_EXPIRED_DELETE_BATCH_SIZE = 500
+
+
 class ExpiresAtMixin(Generic[M_EXPIRES_AT]):
-    async def delete_expired(self: ExpiresAtRepositoryProtocol[M_EXPIRES_AT]):
-        statement = delete(self.model).where(self.model.is_expired.is_(True))
-        await self._execute_statement(statement)
+    async def delete_expired(
+        self: ExpiresAtRepositoryProtocol[M_EXPIRES_AT],
+        *,
+        batch_size: int = DEFAULT_EXPIRED_DELETE_BATCH_SIZE,
+        delay: float = 0.0,
+    ) -> int:
+        """Delete every expired row in bounded batches.
+
+        Instead of issuing a single ``DELETE`` over the whole table — which can
+        hold a long transaction and heavy locks when a lot of rows have expired
+        — rows are removed in batches of at most ``batch_size``, each in its own
+        transaction. An optional ``delay`` (in seconds) is awaited between
+        batches to throttle the pressure put on the database.
+
+        Returns the total number of rows that were deleted.
+        """
+        if batch_size <= 0:
+            raise ValueError(  # noqa: TRY003
+                "batch_size must be a strictly positive integer"
+            )
+        if delay < 0:
+            raise ValueError(  # noqa: TRY003
+                "delay must be a positive number of seconds"
+            )
+
+        total_deleted = 0
+        while True:
+            deleted = await self.delete_expired_batch(batch_size)
+            total_deleted += deleted
+            # A batch smaller than the limit means the table has been drained.
+            if deleted < batch_size:
+                break
+            if delay > 0:
+                await asyncio.sleep(delay)
+        return total_deleted
+
+    async def delete_expired_batch(
+        self: ExpiresAtRepositoryProtocol[M_EXPIRES_AT], batch_size: int
+    ) -> int:
+        """Delete a single batch of at most ``batch_size`` expired rows.
+
+        The expired primary keys are selected first and then removed with a
+        ``DELETE ... WHERE pk IN (...)``. Selecting the keys up front keeps the
+        statement portable (``DELETE ... LIMIT`` is not supported by SQLite) and
+        bounds the number of rows a single transaction has to touch.
+
+        Returns the number of rows deleted in this batch (``0`` when no expired
+        row remains, in which case no ``DELETE`` is issued).
+        """
+        primary_key = class_mapper(self.model).primary_key[0]
+        select_statement = (
+            select(primary_key).where(self.model.is_expired.is_(True)).limit(batch_size)
+        )
+        result = await self._execute_query(select_statement)
+        ids = result.scalars().all()
+        if not ids:
+            return 0
+
+        delete_statement = delete(self.model).where(primary_key.in_(ids))
+        await self._execute_statement(delete_statement)
+        return len(ids)
 
 
 REPOSITORY = TypeVar("REPOSITORY", bound=BaseRepository)
