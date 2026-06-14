@@ -10,42 +10,78 @@ from fief.repositories import (
 )
 from fief.tasks.base import ObjectDoesNotExistTaskError, TaskBase
 
+DEFAULT_BATCH_SIZE = 100
+
 
 class OnRoleUpdated(TaskBase):
     __name__ = "on_role_updated"
 
+    def __init__(self, *args, batch_size: int = DEFAULT_BATCH_SIZE, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.batch_size = batch_size
+
     async def run(
         self, role_id: str, added_permissions: list[str], deleted_permissions: list[str]
     ):
+        role_uuid = uuid.UUID(role_id)
+        added_permission_ids = [uuid.UUID(permission) for permission in added_permissions]
+        deleted_permission_ids = [
+            uuid.UUID(permission) for permission in deleted_permissions
+        ]
+
         async with self.get_main_session() as session:
             role_repository = RoleRepository(session)
-            user_role_repository = UserRoleRepository(session)
-            user_permission_repository = UserPermissionRepository(session)
-
-            role = await role_repository.get_by_id(uuid.UUID(role_id))
-
+            role = await role_repository.get_by_id(role_uuid)
             if role is None:
                 raise ObjectDoesNotExistTaskError(Role, role_id)
 
-            # Add newly added permissions to users with this role
-            user_roles = await user_role_repository.get_by_role(role.id)
-            user_permissions: list[UserPermission] = []
-            for user_role in user_roles:
-                for added_permission in added_permissions:
-                    user_permissions.append(
-                        UserPermission(
-                            user_id=user_role.user_id,
-                            permission_id=uuid.UUID(added_permission),
-                            from_role_id=role.id,
+            if not added_permission_ids and not deleted_permission_ids:
+                return
+
+            user_role_repository = UserRoleRepository(session)
+            user_permission_repository = UserPermissionRepository(session)
+
+            # Propagate the change to the users holding this role in bounded batches.
+            # Each batch is committed independently and every operation is idempotent
+            # (added permissions skip the ones already granted, deletions are
+            # set-based), so the task keeps a flat memory footprint, short
+            # transactions, and can be safely retried/resumed: re-running always
+            # converges to the correct final ``UserPermission`` state.
+            after: uuid.UUID | None = None
+            while True:
+                user_ids = await user_role_repository.get_user_ids_by_role_paginated(
+                    role_uuid, after=after, limit=self.batch_size
+                )
+                if not user_ids:
+                    break
+                after = user_ids[-1]
+
+                if added_permission_ids:
+                    existing_pairs = (
+                        await user_permission_repository.get_existing_permission_pairs(
+                            user_ids, added_permission_ids, role_uuid
                         )
                     )
-            await user_permission_repository.create_many(user_permissions)
+                    user_permissions = [
+                        UserPermission(
+                            user_id=user_id,
+                            permission_id=permission_id,
+                            from_role_id=role_uuid,
+                        )
+                        for user_id in user_ids
+                        for permission_id in added_permission_ids
+                        if (user_id, permission_id) not in existing_pairs
+                    ]
+                    if user_permissions:
+                        await user_permission_repository.create_many(user_permissions)
 
-            # Revoke deleted permissions to users with this role
-            for deleted_permission in deleted_permissions:
-                await user_permission_repository.delete_by_permission_and_role(
-                    uuid.UUID(deleted_permission), role.id
-                )
+                if deleted_permission_ids:
+                    await user_permission_repository.delete_by_permissions_and_role_for_users(
+                        deleted_permission_ids, user_ids, role_uuid
+                    )
+
+                # Detach this batch's objects so memory stays flat across batches.
+                session.expunge_all()
 
 
 on_role_updated = dramatiq.actor(OnRoleUpdated())

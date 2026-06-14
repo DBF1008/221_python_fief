@@ -28,3 +28,24 @@ class UserRoleRepository(BaseRepository[UserRole], UUIDRepositoryMixin[UserRole]
 
     async def get_by_role(self, role: UUID4) -> list[UserRole]:
         return await self.list(select(UserRole).where(UserRole.role_id == role))
+
+    async def get_user_ids_by_role_paginated(
+        self, role: UUID4, *, after: UUID4 | None = None, limit: int = 100
+    ) -> list[UUID4]:
+        """Return up to ``limit`` user ids holding ``role``, ordered by user id.
+
+        Uses keyset pagination on ``user_id`` (``(role_id, user_id)`` is unique) so
+        callers can iterate over every user of a role in bounded batches without the
+        offset drift of skip/limit pagination. Pass the last returned id as ``after``
+        to fetch the next page; an empty list signals the end.
+        """
+        statement = (
+            select(UserRole.user_id)
+            .where(UserRole.role_id == role)
+            .order_by(UserRole.user_id)
+            .limit(limit)
+        )
+        if after is not None:
+            statement = statement.where(UserRole.user_id > after)
+        result = await self._execute_query(statement)
+        return list(result.scalars().all())
