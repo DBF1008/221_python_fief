@@ -237,7 +237,7 @@ dependencies = [
     "python-multipart ==0.0.17",
     "pydantic-settings ==2.6.1",
     "pwdlib[argon2,bcrypt] ==0.2.1",
-    "sendgrid ==6.11.0",
+    "sendgrid ==6.12.5",
     "psycopg2 ==2.9.10",
     "pycountry >=23,<25",
     "python-slugify ==8.0.4",
