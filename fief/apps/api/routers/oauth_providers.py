@@ -1,5 +1,8 @@
+import asyncio
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import cast
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from fastapi.exceptions import RequestValidationError
@@ -34,6 +37,52 @@ from fief.services.webhooks.models import (
 )
 
 router = APIRouter(dependencies=[Depends(is_authenticated_admin_api)])
+
+# ---------------------------------------------------------------------------
+# Single-flight state for OAuth token refresh.
+# Prevents concurrent refresh calls for the same OAuthAccount by serialising
+# them through a per-account asyncio.Lock and sharing the first caller's
+# result with all subsequent waiters via an in-memory cache.
+# ---------------------------------------------------------------------------
+_refresh_locks: dict[UUID, asyncio.Lock] = {}
+_refresh_results: dict[UUID, dict] = {}
+# Reference count: how many coroutines currently hold or are waiting on the
+# per-account lock.  The cache entry is evicted only once the last holder
+# exits, which avoids a race where A's finally-block cleans up before B has
+# been scheduled to read the shared result.
+_refresh_holder_count: dict[UUID, int] = {}
+
+
+def _get_refresh_lock(account_id: UUID) -> asyncio.Lock:
+    """Return the per-account lock, creating one lazily if needed."""
+    lock = _refresh_locks.get(account_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _refresh_locks[account_id] = lock
+    return lock
+
+
+@asynccontextmanager
+async def _account_refresh_lock(account_id: UUID):
+    """Async context-manager that holds the per-account refresh lock.
+
+    A reference count tracks how many coroutines are inside the context
+    manager (either holding the lock or queued on it).  The shared-result
+    cache and the lock itself are evicted only when the *last* holder exits,
+    guaranteeing that every waiter has had a chance to read the result.
+    """
+    lock = _get_refresh_lock(account_id)
+    _refresh_holder_count[account_id] = _refresh_holder_count.get(account_id, 0) + 1
+    await lock.acquire()
+    try:
+        yield
+    finally:
+        lock.release()
+        _refresh_holder_count[account_id] -= 1
+        if _refresh_holder_count[account_id] == 0:
+            del _refresh_holder_count[account_id]
+            _refresh_results.pop(account_id, None)
+            _refresh_locks.pop(account_id, None)
 
 
 @router.get(
@@ -185,34 +234,52 @@ async def get_user_access_token(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
 
     if oauth_account.is_expired():
-        oauth_provider_service = get_oauth_provider_service(oauth_provider)
-        try:
-            access_token_dict = await oauth_provider_service.refresh_token(
-                cast(str, oauth_account.refresh_token)
-            )
-        except RefreshTokenNotSupportedError as e:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=APIErrorCode.OAUTH_PROVIDER_REFRESH_TOKEN_NOT_SUPPORTED,
-            ) from e
-        except RefreshTokenError as e:
-            logger.warning(
-                "Error while refreshing OAuth Provider access token",
-                message=e.message,
-                error_body=e.response.text if e.response is not None else None,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=APIErrorCode.OAUTH_PROVIDER_REFRESH_TOKEN_ERROR,
-            ) from e
-        oauth_account.access_token = access_token_dict["access_token"]
-        try:
-            oauth_account.expires_at = datetime.fromtimestamp(
-                access_token_dict["expires_at"], tz=UTC
-            )
-        except KeyError:
-            oauth_account.expires_at = None
-        await oauth_account_repository.update(oauth_account)
+        async with _account_refresh_lock(oauth_account.id):
+            # Another coroutine may have already refreshed while we waited.
+            cached = _refresh_results.get(oauth_account.id)
+            if cached is not None:
+                oauth_account.access_token = cached["access_token"]
+                oauth_account.expires_at = cached["expires_at"]
+            else:
+                # First caller — perform the actual external refresh.
+                oauth_provider_service = get_oauth_provider_service(oauth_provider)
+                try:
+                    access_token_dict = await oauth_provider_service.refresh_token(
+                        cast(str, oauth_account.refresh_token)
+                    )
+                except RefreshTokenNotSupportedError as e:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=APIErrorCode.OAUTH_PROVIDER_REFRESH_TOKEN_NOT_SUPPORTED,
+                    ) from e
+                except RefreshTokenError as e:
+                    logger.warning(
+                        "Error while refreshing OAuth Provider access token",
+                        message=e.message,
+                        error_body=(
+                            e.response.text if e.response is not None else None
+                        ),
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=APIErrorCode.OAUTH_PROVIDER_REFRESH_TOKEN_ERROR,
+                    ) from e
+
+                oauth_account.access_token = access_token_dict["access_token"]
+                try:
+                    oauth_account.expires_at = datetime.fromtimestamp(
+                        access_token_dict["expires_at"], tz=UTC
+                    )
+                except KeyError:
+                    oauth_account.expires_at = None
+
+                await oauth_account_repository.update(oauth_account)
+
+                # Publish result for any concurrent waiters.
+                _refresh_results[oauth_account.id] = {
+                    "access_token": oauth_account.access_token,
+                    "expires_at": oauth_account.expires_at,
+                }
 
     audit_logger(
         AuditLogMessage.OAUTH_PROVIDER_USER_ACCESS_TOKEN_GET,
