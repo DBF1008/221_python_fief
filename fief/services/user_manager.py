@@ -1,5 +1,6 @@
 import json
 import uuid
+from datetime import UTC, datetime
 
 from fastapi import Request
 from furl import furl
@@ -156,12 +157,35 @@ class UserManager:
         if not user.is_active:
             raise UserInactiveError()
 
-        if user.email != email:
+        email_changed = user.email != email
+
+        if email_changed:
             try:
                 await self.get_by_email(email, user.tenant_id)
                 raise UserAlreadyExistsError()  # noqa: TRY301
             except UserDoesNotExistError:
                 pass
+
+        # Cooldown / reuse logic: only applies when the email has not changed.
+        # If a non-expired verification for the same email was created within
+        # the cooldown window, reuse it silently without sending a new email.
+        if not email_changed:
+            existing = await self.email_verification_repository.get_by_user(
+                user.id
+            )
+            reusable = [
+                ev
+                for ev in existing
+                if ev.email == email and not ev.is_expired
+            ]
+            if reusable:
+                latest = max(reusable, key=lambda ev: ev.created_at)
+                elapsed = (datetime.now(UTC) - latest.created_at).total_seconds()
+                if (
+                    elapsed
+                    < settings.email_verification_resend_cooldown_seconds
+                ):
+                    return
 
         await self.email_verification_repository.delete_by_user(user.id)
         code, code_hash = generate_verify_code()

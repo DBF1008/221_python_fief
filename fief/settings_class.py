@@ -110,6 +110,7 @@ class Settings(BaseSettings):
 
     email_verification_code_length: int = 6
     email_verification_lifetime_seconds: int = 3600
+    email_verification_resend_cooldown_seconds: int = 60
 
     oauth_session_lifetime_seconds: int = 3600
 

@@ -767,6 +767,10 @@ class TestAuthVerifyEmailRequest:
             "not_verified_email"
         ][0]
 
+        # Clear seed verification records so the endpoint creates a fresh one
+        email_verification_repository = EmailVerificationRepository(main_session)
+        await email_verification_repository.delete_by_user(user.id)
+
         response = await test_client_auth.get(
             f"{path_prefix}/verify-request", cookies=cookies
         )

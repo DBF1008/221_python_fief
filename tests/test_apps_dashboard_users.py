@@ -8,6 +8,7 @@ from fastapi import status
 
 from fief.db import AsyncSession
 from fief.repositories import (
+    EmailVerificationRepository,
     UserPermissionRepository,
     UserRepository,
     UserRoleRepository,
@@ -411,6 +412,11 @@ class TestVerifyEmailRequest:
         main_session: AsyncSession,
     ):
         user = test_data["users"]["not_verified_email"]
+
+        # Clear seed verification records so the endpoint creates a fresh one
+        email_verification_repository = EmailVerificationRepository(main_session)
+        await email_verification_repository.delete_by_user(user.id)
+
         response = await test_client_dashboard.post(f"/users/{user.id}/verify-request")
 
         assert response.status_code == status.HTTP_202_ACCEPTED
